@@ -362,10 +362,11 @@ bool launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
         // exceed the 64K per-SM register file and admit one resident CTA. Clamp against the
         // driver's true occupancy so the cooperative grid never exceeds SMs * maxBlocksPerSM
         // (larger problems fall into the chunked path below, which needs no cross-tile reduction).
-        // [本地 MSVC 兼容修复] MSVC (VS2022 / 14.4x) 对 C3493 的判定比作者构建用的
-        // VS18 BuildTools (14.51) 严格：std::min(const T&, const T&) 会绑定 constexpr
-        // 局部变量 kTunedResidentCtasPerSm，这构成 odr-use，lambda 必须显式捕获，
-        // 否则报 C3493/C2326。显式按值捕获对所有权柄/编译器语义不变。
+        // [本地补的编译修正] 无捕获 lambda 里 std::min(const T&, const T&) 会绑定 constexpr
+        // 局部变量 kTunedResidentCtasPerSm，这构成 odr-use，按标准 lambda 必须显式捕获，
+        // 否则 MSVC 报 C3493 / C2326。显式按值捕获对所有编译器语义不变。
+        // 注：本文件不在作者补丁集内（其 patches/README 说明 changed-files/ 只快照三元相关改动），
+        // 作者 docs/04 §1.8 提到的「三个编译错误」未列出明细，故此类工具链修正是我们自己补的。
         static const std::int32_t kResidentCtasPerSm = [kTunedResidentCtasPerSm] {
             int full_blocks       = 0;
             int predicated_blocks = 0;

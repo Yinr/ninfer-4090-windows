@@ -18,11 +18,12 @@ name: Build NInfer (Ternary Bonsai, sm_89 / RTX 4070)
 #     BtbN 的 win64-gpl-shared 包里 lib/ 同时含 MinGW .dll.a 与 MSVC *.lib，可直接用。
 #  3) third_party (spdlog/utf8proc/nlohmann/cpp-httplib) 为仓库内联，无 submodule，--depth 1 够用。
 #  4) 引擎不需 cuDNN（CMake 无 cudnn 引用），CUDA toolkit 自身即够。
-#  5) 【MSVC 严格性】作者用 VS18 BuildTools (MSVC 14.51) 编译，而 windows-latest 是
-#     VS2022 (MSVC 14.4x)，后者仍执行 C3493。受影响的是上游文件
-#     src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu:365 —— 无捕获 lambda
+#  5) 【上游文件需自行补工具链修正】作者 patches/README-改动说明.md 明确 `changed-files/` 只快照
+#     「三元相关改动」，且 docs/04 §1.8 只提到「三个编译错误」而从未列出 ⇒ 这类修正未随包发布。
+#     实测：上游 src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu:365 无捕获 lambda
 #     里 std::min(..., kTunedResidentCtasPerSm) 绑定 constexpr 局部变量 => odr-use
-#     => 必须显式捕获。本仓库 patches/ 里已带修好的版本（作者补丁集未含此文件，无冲突）。
+#     => 报 C3493，必须显式 `[kTunedResidentCtasPerSm]` 捕获。本仓库 patches/ 已带修好的版本。
+#     ⚠️ 别归因于 MSVC 版本：runner 实际就是作者同款 MSVC 14.51.36231（VS18 Enterprise），已否证。
 #     注：src/ops/linear{,_swiglu}/nvfp4/*_w4a4_tma.cu 有同型写法，但 CMake 中它们被
 #     `if(CMAKE_CUDA_ARCHITECTURES MATCHES "^120")` 门控，sm_89 构建根本不编译，无需改。
 #  6) 仓库 CMake 已自带 /utf-8 与 -Xcompiler=/utf-8（CMakeLists.txt:44/47/50），
