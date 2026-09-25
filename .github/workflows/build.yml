@@ -1,9 +1,12 @@
 name: Build NInfer (Ternary Bonsai, sm_89 / RTX 4070)
 
 # 目标：在 GitHub Actions Windows runner 上，用 TiptopFunk 的 v1.0.8 Windows 端口
-# (commit 6eb70a07，即 ada 补丁文档指定的基座) + ninfer-ada-ternary 的 39 个三元补丁，
-# 编译出 sm_89 的三元 Bonsai 推理引擎二进制，并把 CUDA 13.3 运行时 DLL + ffmpeg 一并打包，
-# 使最终制品可在【无任何本地 CUDA/MSVC 安装】的 Windows 机器上直接运行。
+# (commit 6eb70a07，即 ada 补丁文档指定的基座) + ninfer-ada-ternary 的补丁集，
+# 编译出 sm_89 的三元 Bonsai 推理引擎二进制，并把 FFmpeg DLL + MSVC CRT 一并打包。
+#
+# ⚠️ 不需要 CUDA 运行时 DLL：CUDA 是**静态链接**进 exe 的（实测 PE 导入表无 cudart64_*.dll，
+#    GPU 侧走驱动 nvcuda.dll）。所以制品只要机器有 NVIDIA 驱动 + VC++ 运行时即可。
+#    另外 CUDA 13.x 已把 64 位 DLL 从 bin\ 挪到 bin\x64\ —— 别再用 "$CUDA_PATH/bin"/*64_13*.dll 通配。
 #
 # 为什么走 Actions：本地机器缺 MSVC / CUDA 13 工具链、C 盘满、非管理员。
 # Actions Windows runner 自带 MSVC2022 + CMake + Ninja + 管理员权限，CUDA 用 action 现装。
@@ -92,23 +95,48 @@ jobs:
         # 一次 run 就能拿到全部编译错误，避免每轮 25 分钟才发现一个错。
         run: cmake --build engine/build --config Release -j 16 -- -k 0
 
-      - name: 收集运行时 (引擎二进制 + FFmpeg DLL + CUDA 13.3 DLL)
+      - name: 收集运行时 (引擎二进制 + FFmpeg DLL + MSVC CRT)
         shell: bash
         run: |
           mkdir -p dist
           cp engine/build/apps/ninfer.exe dist/           2>/dev/null || true
           cp engine/build/apps/ninfer-serve.exe dist/     2>/dev/null || true
           cp engine/build/apps/ninfer-perplexity.exe dist/ 2>/dev/null || true
-          # FFmpeg 运行时 DLL（来自内置开发包的 bin/）
+
+          # FFmpeg 运行时 DLL（来自内置开发包的 bin/）—— exe 的导入表里真实存在，
+          # 必须随包（avcodec-63 / avformat-63 / avutil-61 / swscale-10）。
           cp engine/ffmpeg/bin/*.dll dist/ 2>/dev/null || true
-          # CUDA 13.3 运行时 DLL
-          CUDA_BIN=$(ls -d "/c/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin" 2>/dev/null || true)
-          echo "CUDA_BIN=$CUDA_BIN"
-          if [ -n "$CUDA_BIN" ]; then
-            cp "$CUDA_BIN"/*64_13*.dll dist/ 2>/dev/null || true   # cudart/cublas/cublasLt/nvrtc/nvJitLink/nvptxcompiler ...
-            cp "$CUDA_BIN"/cudnn64*.dll dist/ 2>/dev/null || true  # 引擎不需要 cudnn，有则带上
-          fi
+
+          # MSVC CRT（动态 /MD）—— PE 导入表实际依赖 MSVCP140 / VCRUNTIME140 / VCRUNTIME140_1，
+          # 带上可让制品在没装 VC++ Redist 的机器上也能跑。
+          CRT=$(ls -d "$VCToolsRedistDir"x64/Microsoft.VC*.CRT 2>/dev/null | head -1)
+          echo "CRT=$CRT"
+          if [ -n "$CRT" ]; then cp "$CRT"/*.dll dist/ 2>/dev/null || true; fi
+
+          # ⚠️ CUDA 运行时 DLL：**不需要**。
+          #    引擎只链 `cudart.lib` 且是【静态】链接 —— 实测 PE 导入表里只有
+          #    d3d12/dxgi/av*/KERNEL32/MSVCP140/VCRUNTIME140/api-ms-win-crt-*，
+          #    没有任何 cudart64_*.dll；GPU 侧走 nvcuda.dll（驱动自带）。
+          #    另注：即便要拷，CUDA **13.x 已把 64 位 DLL 从 bin\ 移到 bin\x64\**，
+          #    老的 `"$CUDA_PATH/bin"/*64_13*.dll` 通配会匹配 0 个文件（曾踩）。
+          #    下面保留双路径兜底，仅为将来若改成动态链接时仍能工作。
+          for d in "$CUDA_PATH/bin" "$CUDA_PATH/bin/x64"; do
+            if [ -d "$d" ]; then
+              echo "--- scanning $d ---"
+              cp "$d"/*64_13*.dll dist/ 2>/dev/null || true
+              cp "$d"/cudnn64*.dll  dist/ 2>/dev/null || true
+            fi
+          done
           echo "--- dist ---"; ls -la dist
+
+      - name: 冒烟测试 (三个 exe 必须都能打印 usage)
+        shell: bash
+        run: |
+          for e in ninfer ninfer-serve ninfer-perplexity; do
+            echo "===== $e ====="
+            ./dist/$e.exe --help > /tmp/out.txt 2>&1 && echo "OK exit=0" || echo "FAIL exit=$?"
+            head -3 /tmp/out.txt
+          done
 
       - name: 上传制品
         uses: actions/upload-artifact@v4
