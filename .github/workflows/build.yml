@@ -18,6 +18,15 @@ name: Build NInfer (Ternary Bonsai, sm_89 / RTX 4070)
 #     BtbN 的 win64-gpl-shared 包里 lib/ 同时含 MinGW .dll.a 与 MSVC *.lib，可直接用。
 #  3) third_party (spdlog/utf8proc/nlohmann/cpp-httplib) 为仓库内联，无 submodule，--depth 1 够用。
 #  4) 引擎不需 cuDNN（CMake 无 cudnn 引用），CUDA toolkit 自身即够。
+#  5) 【MSVC 严格性】作者用 VS18 BuildTools (MSVC 14.51) 编译，而 windows-latest 是
+#     VS2022 (MSVC 14.4x)，后者仍执行 C3493。受影响的是上游文件
+#     src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu:365 —— 无捕获 lambda
+#     里 std::min(..., kTunedResidentCtasPerSm) 绑定 constexpr 局部变量 => odr-use
+#     => 必须显式捕获。本仓库 patches/ 里已带修好的版本（作者补丁集未含此文件，无冲突）。
+#     注：src/ops/linear{,_swiglu}/nvfp4/*_w4a4_tma.cu 有同型写法，但 CMake 中它们被
+#     `if(CMAKE_CUDA_ARCHITECTURES MATCHES "^120")` 门控，sm_89 构建根本不编译，无需改。
+#  6) 仓库 CMake 已自带 /utf-8 与 -Xcompiler=/utf-8（CMakeLists.txt:44/47/50），
+#     故 VSLANG=1033 + /utf-8 这套中文编码坑已闭合；三元补丁源内也无非 ASCII 字面量。
 
 on:
   workflow_dispatch:        # 允许在 Actions 页面手动触发
@@ -42,7 +51,7 @@ jobs:
           git fetch --depth 1 origin 6eb70a0784b68c87efcbeb0b08bd2c3a95914492
           git checkout 6eb70a0784b68c87efcbeb0b08bd2c3a95914492
 
-      - name: 应用三元 (ada) 补丁 — 覆盖 26 个文件 + 新建 src/ops/linear/ternary/
+      - name: 应用三元 (ada) 补丁 + 本地 MSVC 兼容修复 — 覆盖 27 个文件 + 新建 src/ops/linear/ternary/
         shell: cmd
         run: xcopy /E /Y patches\changed-files\* engine\
 
@@ -78,7 +87,9 @@ jobs:
 
       - name: 编译
         shell: cmd
-        run: cmake --build engine/build --config Release -j 16
+        # `-- -k 0` 把 -k 0 透传给 ninja：失败后继续编译其余目标，
+        # 一次 run 就能拿到全部编译错误，避免每轮 25 分钟才发现一个错。
+        run: cmake --build engine/build --config Release -j 16 -- -k 0
 
       - name: 收集运行时 (引擎二进制 + FFmpeg DLL + CUDA 13.3 DLL)
         shell: bash
