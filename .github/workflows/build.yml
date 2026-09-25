@@ -1,0 +1,89 @@
+name: Build NInfer (Ternary Bonsai, sm_89 / RTX 4070)
+
+# 目标：在 GitHub Actions Windows runner 上，用 TiptopFunk 的 v1.0.8 Windows 端口
+# (commit 6eb70a07，即 ada 补丁文档指定的基座) + ninfer-ada-ternary 的 39 个三元补丁，
+# 编译出 sm_89 的三元 Bonsai 推理引擎二进制，并把 CUDA 13.3 运行时 DLL + ffmpeg 一并打包，
+# 使最终制品可在【无任何本地 CUDA/MSVC 安装】的 Windows 机器上直接运行。
+#
+# 为什么走 Actions：本地机器缺 MSVC / CUDA 13 工具链、C 盘满、非管理员。
+# Actions Windows runner 自带 MSVC2022 + CMake + Ninja + 管理员权限，CUDA 用 action 现装。
+
+on:
+  workflow_dispatch:        # 允许在 Actions 页面手动触发
+  push:
+    branches: [ ternary-ci ]
+
+env:
+  VSLANG: "1033"            # MSVC 英文诊断，便于读错误
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout CI 仓库 (workflow + patches)
+        uses: actions/checkout@v4
+
+      - name: 克隆引擎基座 (TiptopFunk = Ambolio v1.0.8 @ 6eb70a07)
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/TiptopFunk/ninfer-4090-windows.git engine
+          cd engine
+          git fetch --depth 1 origin 6eb70a0784b68c87efcbeb0b08bd2c3a95914492
+          git checkout 6eb70a0784b68c87efcbeb0b08bd2c3a95914492
+
+      - name: 应用三元 (ada) 补丁 — 覆盖 26 个文件 + 新建 src/ops/linear/ternary/
+        shell: cmd
+        run: xcopy /E /Y patches\changed-files\* engine\
+
+      - name: 安装 CUDA 13.3 工具链
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: '13.3.1'      # 实测 NVIDIA 源无 13.3.33（文档笔误）；13.3.0 / 13.3.1 均可，同 13.3 系编译等价
+
+      - name: 设置 MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: CMake 配置 (sm_89，编译 Apps)
+        shell: cmd
+        run: |
+          cmake -B engine/build -S engine -G Ninja ^
+            -DCMAKE_CUDA_ARCHITECTURES=89 ^
+            -DNINFER_ENABLE_AVX2=ON ^
+            -DNINFER_BUILD_APPS=ON ^
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: 编译
+        shell: cmd
+        run: cmake --build engine/build --config Release -j 16
+
+      - name: 收集运行时 (引擎二进制 + CUDA 13.3 DLL)
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp engine/build/apps/ninfer.exe dist/           2>/dev/null || true
+          cp engine/build/apps/ninfer-serve.exe dist/     2>/dev/null || true
+          cp engine/build/apps/ninfer-perplexity.exe dist/ 2>/dev/null || true
+          CUDA_BIN=$(ls -d /c/Program\ Files/NVIDIA\ GPU\ Computing\ Toolkit/CUDA/v13.3/bin 2>/dev/null || true)
+          echo "CUDA_BIN=$CUDA_BIN"
+          if [ -n "$CUDA_BIN" ]; then
+            cp "$CUDA_BIN"/*64_13*.dll dist/ 2>/dev/null || true   # cudart/cublas/cublasLt/nvrtc/nvJitLink/nvptxcompiler ...
+            cp "$CUDA_BIN"/cudnn64*.dll dist/ 2>/dev/null || true  # cudnn
+          fi
+          echo "--- dist ---"; ls -la dist
+
+      - name: 下载并附带 ffmpeg 共享库 (媒体采集被 Apps 强制开启，文本也可不用但带上保险)
+        shell: bash
+        run: |
+          curl -L -o ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip
+          mkdir -p ffmpeg_tmp && (unzip -o ffmpeg.zip -d ffmpeg_tmp >/dev/null 2>&1 || true)
+          find ffmpeg_tmp -type f \( -name 'avcodec-*.dll' -o -name 'avformat-*.dll' -o -name 'avutil-*.dll' -o -name 'swscale-*.dll' -o -name 'swresample-*.dll' \) \
+            | while read f; do cp "$f" dist/; done
+          echo "--- dist ---"; ls -la dist
+
+      - name: 上传制品
+        uses: actions/upload-artifact@v4
+        with:
+          name: ninfer-ternary-win-sm89
+          path: dist/*
