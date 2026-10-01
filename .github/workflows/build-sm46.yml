@@ -43,6 +43,12 @@ jobs:
           - arm: sm46-a3
             sm_count: 46
             apply_a3: "yes"
+          # 部署用这个臂：默认 SM（不传 NINFER_SM_COUNT，走 NINFER_SM89 → 128）+ A3。
+          # 2026-10-01 本机实测：E1（SM=46）在 8 档 prefill 长度测试里 8 档都慢 0.4~1.7%，
+          # 属于稳定的小回归；A3 则全区间 +6%~+10.7% 且逐位不变。所以只留 A3。
+          - arm: a3-default
+            sm_count: 0          # 0 = 不传 -DNINFER_SM_COUNT，用树内默认
+            apply_a3: "yes"
 
     steps:
       - name: Checkout
@@ -104,11 +110,16 @@ jobs:
         shell: pwsh
         run: |
           # 旧 CI 踩过的坑：宏可能没真进编译行，编完才发现白编。这里当门禁查。
+          # sm_count=0 表示"不覆盖，用每架构默认值"，CMakeLists 会解析成
+          # sm_89 -> 128 / sm_120 -> 170（CMakeLists.txt:28-37），所以这里要断言的是
+          # 解析后的值，而不是 0 本身。
+          $want = '${{ matrix.sm_count }}'
+          if ($want -eq '0') { $want = '128' }   # 本工作流固定 CMAKE_CUDA_ARCHITECTURES=89
           $ninja = 'engine-sm89\build\build.ninja'
           if (-not (Test-Path $ninja)) { throw "build.ninja not found" }
-          $hit = Select-String -Path $ninja -Pattern "NINFER_SM_COUNT=${{ matrix.sm_count }}(?!\d)" -Quiet
-          if (-not $hit) { throw "NINFER_SM_COUNT=${{ matrix.sm_count }} is NOT in build.ninja" }
-          Write-Host "OK: NINFER_SM_COUNT=${{ matrix.sm_count }} present in build.ninja"
+          $hit = Select-String -Path $ninja -Pattern "NINFER_SM_COUNT=$want(?!\d)" -Quiet
+          if (-not $hit) { throw "NINFER_SM_COUNT=$want is NOT in build.ninja" }
+          Write-Host "OK: NINFER_SM_COUNT=$want present in build.ninja"
 
       - name: Build
         shell: cmd
