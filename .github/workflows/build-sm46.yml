@@ -120,6 +120,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "dist-${{ matrix.arm }}" | Out-Null
+          $missing = $false
           foreach ($e in 'ninfer','ninfer-serve','ninfer-perplexity') {
             $src = "engine-sm89\build\apps\$e.exe"
             if (Test-Path $src) {
@@ -127,29 +128,49 @@ jobs:
               Write-Host "collected $e.exe"
             } else {
               Write-Host "MISSING $e.exe"
+              $missing = $true
             }
           }
-          # FFmpeg 运行时 DLL 不进制品：本地部署目录已有全套 7 个。
-          # CUDA 运行时也不需要 —— 引擎静态链 cudart，GPU 侧走驱动 nvcuda.dll。
-          Get-ChildItem "dist-${{ matrix.arm }}"
+          # 记录 SHA256 与导入表：这些不需要 FFmpeg 运行时就能查，
+          # 是本 runner 上唯一可靠的制品完整性检查。
+          $man = foreach ($f in Get-ChildItem "dist-${{ matrix.arm }}\*.exe") {
+            $b = [IO.File]::ReadAllBytes($f.FullName)
+            $s = [Text.Encoding]::ASCII.GetString($b)
+            $imports = [regex]::Matches($s, '(?i)[A-Za-z0-9_\-\.]+\.dll') | ForEach-Object { $_.Value.ToLower() } |
+                       Where-Object { $_ -match '^(av|sw|msvcp|vcruntime|nvcuda|api-ms|kernel32|d3d12|dxgi)' } |
+                       Select-Object -Unique | Sort-Object
+            "{0}  sha256={1}  bytes={2}" -f $f.Name, (Get-FileHash $f.FullName -Algorithm SHA256).Hash, $f.Length
+            "    imports: " + ($imports -join ', ')
+          }
+          $man | Set-Content "dist-${{ matrix.arm }}\MANIFEST.txt" -Encoding utf8
+          $man | ForEach-Object { Write-Host $_ }
+          if ($missing) { throw "one or more exes were not produced" }
 
-      - name: Smoke test (all three exes must print usage)
+      - name: Smoke test (informational on this runner)
+        # 这三个 exe 都静态/动态依赖 FFmpeg 运行时（avcodec-63 等），而本 runner 上
+        # 没有这些 DLL —— 2026-10-01 首次运行就因此 "no output" 并连带丢掉了已编好的制品。
+        # 所以：PE 完整性已由上一步的 MANIFEST 把关；真正的启动冒烟在本地做（那里有匹配的
+        # 7 个 DLL 和真实 GPU）。这里只记录，不阻断。
+        continue-on-error: true
         shell: pwsh
         run: |
-          $fail = $false
           foreach ($e in 'ninfer','ninfer-serve','ninfer-perplexity') {
             $exe = "dist-${{ matrix.arm }}\$e.exe"
-            if (-not (Test-Path $exe)) { Write-Host "== $e : MISSING"; $fail = $true; continue }
+            if (-not (Test-Path $exe)) { Write-Host "== $e : MISSING"; continue }
             $out = & $exe --help 2>&1 | Out-String
-            Write-Host "===== $e ====="
-            Write-Host ($out -split "`n" | Select-Object -First 3)
-            if (-not $out) { Write-Host "== $e : no output"; $fail = $true }
+            Write-Host "===== $e : exit=$LASTEXITCODE ====="
+            if ($out) { Write-Host ($out -split "`n" | Select-Object -First 3) }
+            else { Write-Host "  (no output — 预期：runner 缺 FFmpeg 运行时 DLL)" }
           }
-          if ($fail) { throw "smoke test failed" }
 
       - name: Upload binaries
+        # 必须 always()：制品是本 run 唯一不可再生的产物（build 目录随 runner 消失），
+        # 绝不能因为后续任何检查失败而丢掉。
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ninfer-ternary-sm89-${{ matrix.arm }}
-          path: dist-${{ matrix.arm }}/*.exe
+          path: |
+            dist-${{ matrix.arm }}/*.exe
+            dist-${{ matrix.arm }}/MANIFEST.txt
           if-no-files-found: error
