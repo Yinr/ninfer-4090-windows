@@ -334,7 +334,8 @@ T=1024 需要 524,300,800 B，计划只有 508,567,552 B，差 15,733,248 B；�
 `--vision` 是后加的：不带它，带图请求一律 `HTTP 400`（§4）。
 
 **已知且属预期**：`start-8085-dflash2.bat` 和 `start-8088-dflash2-128k.bat` 引用的
-`bonsai2_27b_ternary_v2-dflash2.ninfer` 未随本部署提供（12 GB 档用不到），点这两个启动器会失败。
+`bonsai2_27b_ternary_v2-dflash2.ninfer` **是有意未复制的**（12 GB 档用不了，省约 10 GB 磁盘），
+点这两个启动器会失败。清单已按磁盘现状固化，不再报漂移。
 
 **部署件缺运行时 DLL 会静默失败**：新编的 exe 导入 `avcodec-63 / avformat-63 / avutil-61 /
 swscale-10`，把它们拿掉后 exe 直接以 `-1073741515`（`STATUS_DLL_NOT_FOUND`）退出。
