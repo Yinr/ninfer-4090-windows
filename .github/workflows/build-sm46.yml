@@ -1,0 +1,155 @@
+name: Build Ternary ninfer (sm_89)
+
+# 目的：为 RTX 4070（cc 8.9 / SM 46）编译三元 Bonsai 推理引擎，并分离两项改造的各自贡献：
+#   E1 = -DNINFER_SM_COUNT=46   （网格按本卡 SM 数排，而不是出厂默认的 128）
+#   A3 = NINFER_TERNARY_TOKEN_GRID=1（token 轴铺进 grid.y；注意这是【运行时 env】，
+#        编译时只需把 patches-a3/ 的 4 个文件覆盖进树里）
+#
+# 三个臂的关系：
+#   baseline  树原样  + SM=128        → 出厂基线，作为对照
+#   sm46-a3   树+A3   + SM=46         → 一个二进制，运行时用 TOKEN_GRID=0/1 再分出 E1 与 A3
+#
+# 编译配方沿用 ternary-ci 分支已在 2026-09-25 跑通的那套（run 36092517775，42m17s）。
+# 与之不同的三处，都有原因：
+#   1) 源码不再 clone + xcopy 40 个补丁 —— 本分支的 engine-sm89/ 就是已内置三元算子的自包含树；
+#   2) 不再预置 BtbN FFmpeg —— 树内 ffmpeg/{include,lib} 已随包提供；
+#   3) 去掉 -DNINFER_ENABLE_AVX2 / -DNINFER_CUDA_ARCH —— 这两个选项在当前 CMakeLists 里已不存在。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "sm46-a3" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  VSLANG: "1033"   # MSVC 英文诊断
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: baseline
+            sm_count: 128
+            apply_a3: "no"
+          - arm: sm46-a3
+            sm_count: 46
+            apply_a3: "yes"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CUDA 13.3
+        # 必须 >= v0.2.36：更早的 action 版本白名单里没有 13.3.1
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '13.3.1'
+
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Report toolchain actually in use
+        shell: pwsh
+        run: |
+          Write-Host "=== MSVC ==="
+          cl 2>&1 | Select-Object -First 3
+          Write-Host "=== CMake / Ninja ==="
+          cmake --version
+          ninja --version
+          Write-Host "=== nvcc ==="
+          nvcc --version
+          Write-Host "=== disk ==="
+          Get-PSDrive C,D,E -ErrorAction SilentlyContinue |
+            Select-Object Name,@{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} |
+            Format-Table -AutoSize
+
+      - name: Apply A3 patch (sm46-a3 arm only)
+        if: matrix.apply_a3 == 'yes'
+        shell: cmd
+        # 完整替换文件，不是 diff —— 包内 src-tree 与作者开发树不同源，diff 套不上
+        run: xcopy /E /Y patches-a3\* engine-sm89\src\ops\linear\ternary\
+
+      - name: Verify A3 patch landed
+        if: matrix.apply_a3 == 'yes'
+        shell: pwsh
+        run: |
+          $a = (Get-FileHash 'patches-a3\ternary_rowsplit_gemm.cu' -Algorithm SHA256).Hash
+          $b = (Get-FileHash 'engine-sm89\src\ops\linear\ternary\ternary_rowsplit_gemm.cu' -Algorithm SHA256).Hash
+          if ($a -ne $b) { throw "A3 overlay failed: $a != $b" }
+          Write-Host "A3 overlay OK ($($a.Substring(0,12)))"
+
+      - name: Configure CMake
+        shell: cmd
+        # CMakeLists 会校验 CMAKE_CUDA_ARCHITECTURES 只能是 120a/120/89，
+        # 且 NINFER_SM_COUNT 非数字会直接 FATAL —— 配错在这里就停，不会白编 40 分钟。
+        run: |
+          cmake -B engine-sm89\build -S engine-sm89 -G Ninja ^
+            -DCMAKE_CUDA_ARCHITECTURES=89 ^
+            -DNINFER_SM_COUNT=${{ matrix.sm_count }} ^
+            -DNINFER_BUILD_APPS=ON ^
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Assert SM_COUNT reached the compile line
+        shell: pwsh
+        run: |
+          # 旧 CI 踩过的坑：宏可能没真进编译行，编完才发现白编。这里当门禁查。
+          $ninja = 'engine-sm89\build\build.ninja'
+          if (-not (Test-Path $ninja)) { throw "build.ninja not found" }
+          $hit = Select-String -Path $ninja -Pattern "NINFER_SM_COUNT=${{ matrix.sm_count }}(?!\d)" -Quiet
+          if (-not $hit) { throw "NINFER_SM_COUNT=${{ matrix.sm_count }} is NOT in build.ninja" }
+          Write-Host "OK: NINFER_SM_COUNT=${{ matrix.sm_count }} present in build.ninja"
+
+      - name: Build
+        shell: cmd
+        # -- -k 0 把 -k 0 透传给 ninja：失败后继续编其余目标，
+        # 一轮就能拿到全部编译错误，而不是每 40 分钟才发现一个。
+        run: cmake --build engine-sm89\build --config Release -j 16 -- -k 0
+
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist-${{ matrix.arm }}" | Out-Null
+          foreach ($e in 'ninfer','ninfer-serve','ninfer-perplexity') {
+            $src = "engine-sm89\build\apps\$e.exe"
+            if (Test-Path $src) {
+              Copy-Item $src "dist-${{ matrix.arm }}\"
+              Write-Host "collected $e.exe"
+            } else {
+              Write-Host "MISSING $e.exe"
+            }
+          }
+          # FFmpeg 运行时 DLL 不进制品：本地部署目录已有全套 7 个。
+          # CUDA 运行时也不需要 —— 引擎静态链 cudart，GPU 侧走驱动 nvcuda.dll。
+          Get-ChildItem "dist-${{ matrix.arm }}"
+
+      - name: Smoke test (all three exes must print usage)
+        shell: pwsh
+        run: |
+          $fail = $false
+          foreach ($e in 'ninfer','ninfer-serve','ninfer-perplexity') {
+            $exe = "dist-${{ matrix.arm }}\$e.exe"
+            if (-not (Test-Path $exe)) { Write-Host "== $e : MISSING"; $fail = $true; continue }
+            $out = & $exe --help 2>&1 | Out-String
+            Write-Host "===== $e ====="
+            Write-Host ($out -split "`n" | Select-Object -First 3)
+            if (-not $out) { Write-Host "== $e : no output"; $fail = $true }
+          }
+          if ($fail) { throw "smoke test failed" }
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ninfer-ternary-sm89-${{ matrix.arm }}
+          path: dist-${{ matrix.arm }}/*.exe
+          if-no-files-found: error

@@ -1,0 +1,29 @@
+﻿build/
+build_vision/
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.zip
+ffmpeg/
+ffmpeg_temp/
+*.ninfer
+.vs/
+*.log
+fix_api.py
+fix_cost.py
+_build_*/
+__pycache__/
+*.pyc
+
+# ---- ci-sm46 branch: re-include the FFmpeg dev package the build needs ----
+# Upstream ignores ffmpeg/ and *.lib, but MSVC links against the import libs
+# in ffmpeg/lib and compiles against ffmpeg/include. Deeper .gitignore wins,
+# so the negations must live in THIS file.
+!ffmpeg/
+!ffmpeg/include/
+!ffmpeg/include/**
+!ffmpeg/lib/
+!ffmpeg/lib/**
